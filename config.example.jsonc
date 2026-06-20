@@ -15,10 +15,9 @@
   // 如果你不想显示真实姓名，可以保留为“我”。
   "self_name": "我",
 
-  // 联系人名称显示方式。
-  // remark: 优先显示你给对方设置的备注；没有备注才显示对方昵称。
-  // nickname: 优先显示对方自己的微信昵称；没有昵称才显示你的备注。
-  "display_name_mode": "remark",
+  // 联系人名称显示优先级。按列表顺序从上到下尝试，前面的找不到就用后面的。
+  // 可选值: group_nickname(群昵称), nickname(微信昵称), remark(备注)
+  "display_name_priority": ["group_nickname", "nickname", "remark"],
 
   // 大模型配置。当前通过 LiteLLM 调用 DeepSeek 的 Anthropic-compatible endpoint。
   "llm": {
@@ -38,7 +37,15 @@
     "timeout": 90,
 
     // LiteLLM 重试次数。设为 0 可以避免慢请求被隐藏重试。
-    "num_retries": 0
+    "num_retries": 0,
+
+    // LLM 输出 token 限制。
+    // "summarize" 用于短总结（默认 1500）。
+    // "analyze" 用于结构化话题+称号分析（默认 5000）。
+    "max_tokens": {
+      "summarize": 1500,
+      "analyze": 5000
+    }
   },
 
   // 报告输出配置。
@@ -51,6 +58,14 @@
     "render_png": true,
 
     // Markdown 报告中是否保留部分原始消息样本。
-    "include_raw_sample": true
+    "include_raw_sample": true,
+
+    // 报告展示数量限制 (硬编码移入配置)。
+    "limits": {
+      // 最活跃用户 / 称号区域最多展示人数。默认 8。
+      "top_users": 8,
+      // 每个话题最多摘录聊天原文条数。默认 3。
+      "evidence_per_topic": 3,
+    }
   }
 }

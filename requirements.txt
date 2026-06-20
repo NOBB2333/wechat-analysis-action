@@ -1,3 +1,6 @@
 pycryptodome
 litellm
 playwright
+pywin32
+pyautogui
+Pillow

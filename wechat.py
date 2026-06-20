@@ -23,18 +23,27 @@ DEFAULT_SETTINGS = {
     "default_groups": ["家"],
     "self_wxid": "",
     "self_name": "我",
-    "display_name_mode": "remark",
+    "display_name_priority": ["group_nickname", "nickname", "remark"],
     "llm": {
         "auth_token": "",
         "base_url": "https://api.deepseek.com/anthropic",
         "model": "anthropic/deepseek-v4-pro",
         "timeout": 90,
         "num_retries": 0,
+        "max_tokens": {
+            "summarize": 1500,
+            "analyze": 5000,
+        },
     },
     "report": {
         "format": "html",
         "render_png": True,
         "include_raw_sample": True,
+        "limits": {
+            "top_users": 8,
+            "evidence_per_topic": 3,
+            "sample_truncation": 1000,
+        },
     },
 }
 
@@ -47,7 +56,23 @@ def load_config():
     merged = dict(DEFAULT_SETTINGS)
     merged.update(settings)
     merged["llm"] = {**DEFAULT_SETTINGS["llm"], **settings.get("llm", {})}
+    user_llm = settings.get("llm", {})
+    if "max_tokens" in user_llm:
+        merged["llm"]["max_tokens"] = {**DEFAULT_SETTINGS["llm"]["max_tokens"], **user_llm["max_tokens"]}
     merged["report"] = {**DEFAULT_SETTINGS["report"], **settings.get("report", {})}
+    # 向后兼容旧 display_name_mode 配置 → 转为新的 display_name_priority
+    # 检查原始 settings（而非 merged），因为 DEFAULT_SETTINGS 已包含 display_name_priority
+    if "display_name_priority" not in settings and "display_name_mode" in settings:
+        mode = settings["display_name_mode"]
+        if mode == "remark":
+            merged["display_name_priority"] = ["remark", "nickname"]
+        elif mode == "nickname":
+            merged["display_name_priority"] = ["nickname", "remark"]
+        elif mode == "group_nickname":
+            merged["display_name_priority"] = ["group_nickname", "nickname", "remark"]
+    user_report = settings.get("report", {})
+    if "limits" in user_report:
+        merged["report"]["limits"] = {**DEFAULT_SETTINGS["report"]["limits"], **user_report["limits"]}
     return merged
 
 
@@ -236,6 +261,7 @@ def day_range(date_str=None):
 
 def summarize_with_llm(messages_text, group_name, date_str, llm_config):
     try:
+        max_tok = llm_config.get("max_tokens", {}).get("summarize", 1500)
         return call_llm(
             [{
                 "role": "user",
@@ -247,7 +273,7 @@ def summarize_with_llm(messages_text, group_name, date_str, llm_config):
                     f"{messages_text}"
                 ),
             }],
-            max_tokens=1500,
+            max_tokens=max_tok,
             llm_config=llm_config,
         )
     except Exception as e:
@@ -277,7 +303,7 @@ def analyze_structured_with_llm(messages_text, group_name, date_str, llm_config)
 
 要求：
 - 话题必须按连续对话内容和语义聚合，不要按关键词机械拆分。
-- 不要求固定数量；只保留真实形成讨论的主题，通常 3-8 个即可，少就少。
+- 不要求固定数量；只保留真实形成讨论的主题，通常 3-9 个即可，少就少,按照实际话题来。
 - 单句寒暄、单张图片、@某人、纯表情、无上下文短句不要单独列为话题。
 - @对象不是话题，也不是有效证据；纯@消息必须忽略，除非后续有实质内容形成同一段讨论。
 - 如果短句是同一段讨论的一部分，应合并到对应话题。
@@ -289,30 +315,56 @@ def analyze_structured_with_llm(messages_text, group_name, date_str, llm_config)
 聊天记录：
 {messages_text}
 """
+
+# 最后我要补充一个点  “退市整理期の盒马” 这个人 在做 群友称号的时候 给他一个称号 “榜一大哥”  描述的话，你简单写一下
+# 生成的时候，把这个人加到所有的人的最前面。 要让他是第一个 称号的时候，不管他有没有他强行加一个他。 第一个就是她
     try:
-        text = call_llm([{"role": "user", "content": prompt}], max_tokens=5000, llm_config=llm_config)
+        max_tok = llm_config.get("max_tokens", {}).get("analyze", 5000)
+        text = call_llm([{"role": "user", "content": prompt}], max_tokens=max_tok, llm_config=llm_config)
         return parse_llm_json(text)
     except Exception as e:
         print(f"[WARN] 结构化 LLM 分析失败: {e}")
         return None
 
 
+def safe_report_name(name):
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)[:60]
+
+
+def _send_report(png_path, group_name):
+    """Try to send *png_path* to *group_name* via WeChat automation.
+
+    Gracefully degrades if sender dependencies are not installed.
+    """
+    try:
+        from wechat_sender import send_image_to_group
+        send_image_to_group(png_path, group_name)
+    except ImportError as e:
+        print(f"[SEND] 发送模块导入失败: {e}")
+        print("  需要安装额外依赖: pip install pywin32 pyautogui Pillow")
+    except Exception as e:
+        print(f"[SEND] 发送失败: {e}")
+
+
 def render_report(summaries, date_str):
     ensure_export_dirs()
-    md = f"# 微信群日报 - {date_str}\n\n"
+    paths = []
     for group_name, info in summaries.items():
+        md = f"# 微信群日报 - {date_str}\n\n"
         md += f"## {group_name}\n\n"
         md += f"_消息数: {info['count']} 条_\n\n"
         if info.get("summary"):
             md += f"### AI 总结\n\n{info['summary']}\n\n"
         if info.get("sample"):
-            md += f"### 部分消息\n\n```\n{info['sample']}\n```\n\n"
+            md += f"### 聊天记录\n\n```\n{info['sample']}\n```\n\n"
         md += "---\n\n"
 
-    path = os.path.join(REPORTS_DIR, f"report_{date_str}.md")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(md)
-    return path
+        safe_name = safe_report_name(group_name)
+        path = os.path.join(REPORTS_DIR, f"report_{date_str}_{safe_name}.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(md)
+        paths.append(path)
+    return paths
 
 
 def cmd_setup(args):
@@ -366,10 +418,12 @@ def cmd_report(args):
         DECRYPTED_DIR,
         self_wxid=settings.get("self_wxid") or None,
         self_name=settings.get("self_name") or "我",
-        display_name_mode=settings.get("display_name_mode", "remark"),
+        display_name_priority=settings.get("display_name_priority"),
+        display_name_mode=settings.get("display_name_mode"),
     )
     summaries = {}
     visual_outputs = []
+    limits = settings.get("report", {}).get("limits", DEFAULT_SETTINGS["report"]["limits"])
     try:
         print(f"日期: {date_str}")
         print(f"目标群: {groups}")
@@ -386,24 +440,28 @@ def cmd_report(args):
             if not messages:
                 continue
 
-            normalized = db.normalize_messages(messages)
+            normalized = db.normalize_messages(messages, chatroom=username)
             formatted = "\n".join(f'[{m["time_text"]}] {m["sender"]}: {m["text"]}' for m in normalized)
-            analysis = None if args.dry_run else analyze_structured_with_llm(formatted, display, date_str, llm_config)
+            analysis = None if args.dry_run or args.skip_analysis else analyze_structured_with_llm(formatted, display, date_str, llm_config)
             summary = (analysis or {}).get("summary")
             summaries[display] = {
                 "count": len(messages),
                 "summary": summary,
-                "sample": formatted[:3000] if not summary else formatted[:1000],
+                "sample": formatted,
             }
-            safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in display)[:60]
+            safe_name = safe_report_name(display)
             html_path = os.path.join(REPORTS_DIR, f"report_{date_str}_{safe_name}.html")
-            render_html_report(display, date_str, normalized, analysis, html_path)
+            render_html_report(display, date_str, normalized, analysis, html_path,
+                               top_users_count=limits.get("top_users", 8),
+                               evidence_per_topic=limits.get("evidence_per_topic", 3))
             visual_outputs.append(html_path)
             if settings.get("report", {}).get("render_png", True):
                 png_path = os.path.join(REPORTS_DIR, f"report_{date_str}_{safe_name}.png")
                 ok, reason = render_html_to_png(html_path, png_path)
                 if ok:
                     visual_outputs.append(png_path)
+                    if args.send:
+                        _send_report(png_path, display)
                 else:
                     print(f"[WARN] PNG 生成失败: {reason}")
     finally:
@@ -412,8 +470,9 @@ def cmd_report(args):
     if not summaries:
         print("\n没有数据可生成报告")
         return 0
-    path = render_report(summaries, date_str)
-    print(f"\n报告已保存: {path}")
+    paths = render_report(summaries, date_str)
+    for path in paths:
+        print(f"\n报告已保存: {path}")
     for output in visual_outputs:
         print(f"可视化报告: {output}")
     return 0
@@ -439,7 +498,9 @@ def build_parser():
     report.add_argument("--date", help="日期 YYYY-MM-DD，默认今天")
     report.add_argument("--groups", help="群名列表，逗号分隔，如: 家,.NET性能优化")
     report.add_argument("--dry-run", action="store_true", help="不调用 LLM，只输出消息样本")
+    report.add_argument("--skip-analysis", action="store_true", help="跳过 LLM 分析，保留历史分析结果")
     report.add_argument("--limit", type=int, default=1000, help="每个群最多读取消息数")
+    report.add_argument("--send", action="store_true", help="生成后自动将 PNG 发送到对应群聊")
     report.set_defaults(func=cmd_report)
 
     return parser

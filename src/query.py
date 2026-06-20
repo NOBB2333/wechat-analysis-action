@@ -1,7 +1,9 @@
 """
 WeChat 4.1 聊天记录查询库 — 直接查询解密后的 SQLite 数据库
 """
+import html
 import os, hashlib, json, re, sqlite3
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 from paths import DECRYPTED_DIR
@@ -10,15 +12,29 @@ def md5(s):
     return hashlib.md5(s.encode()).hexdigest()
 
 class WeChatDB:
-    def __init__(self, decrypted_dir=None, self_wxid=None, self_name=None, display_name_mode="remark"):
+    def __init__(self, decrypted_dir=None, self_wxid=None, self_name=None,
+                 display_name_mode=None, display_name_priority=None):
         self.dir = decrypted_dir or DECRYPTED_DIR
         self._msg_conns = {}  # lazy-load per-DB connections
         self._contact_conn = None
         self._session_conn = None
         self._sender_cache = {}
+        self._name2id_cache = {}
+        self._global_name2id = None  # 跨 DB 的全局 Name2Id 缓存
+        self._group_nick_cache = {}  # (chatroom, wxid) → 群昵称
         self._self_wxid = self_wxid
         self.self_name = self_name or "我"
-        self.display_name_mode = display_name_mode
+
+        # 新版：优先级列表；旧版 display_name_mode 兼容
+        if display_name_priority:
+            self._name_priority = display_name_priority
+        elif display_name_mode == "nickname":
+            self._name_priority = ["nickname", "remark"]
+        elif display_name_mode == "group_nickname":
+            self._name_priority = ["group_nickname", "nickname", "remark"]
+        else:
+            self._name_priority = ["group_nickname", "nickname", "remark"]
+        self.display_name_mode = display_name_mode  # 保留兼容
 
     @property
     def self_wxid(self):
@@ -61,6 +77,39 @@ class WeChatDB:
             self._msg_conns[db_path] = sqlite3.connect(db_path)
         return self._msg_conns[db_path]
 
+    def _load_name2id(self, db_path):
+        """读取消息库中的 Name2Id 映射，用 real_sender_id 还原发送者。"""
+        if db_path in self._name2id_cache:
+            return self._name2id_cache[db_path]
+
+        mapping = {}
+        try:
+            conn = self._get_msg_conn(db_path)
+            rows = conn.execute("SELECT rowid, user_name FROM Name2Id").fetchall()
+            mapping = {rowid: user_name for rowid, user_name in rows if user_name}
+        except sqlite3.Error:
+            mapping = {}
+
+        self._name2id_cache[db_path] = mapping
+        return mapping
+
+    def _load_global_name2id(self):
+        """跨所有消息库加载 Name2Id 映射，用于 sender 解析的兜底。"""
+        if self._global_name2id is not None:
+            return self._global_name2id
+        mapping = {}
+        for db_path in self._get_msg_dbs():
+            try:
+                conn = self._get_msg_conn(db_path)
+                rows = conn.execute("SELECT rowid, user_name FROM Name2Id").fetchall()
+                for rowid, user_name in rows:
+                    if user_name and rowid not in mapping:
+                        mapping[rowid] = user_name
+            except sqlite3.Error:
+                pass
+        self._global_name2id = mapping
+        return mapping
+
     @property
     def contact(self):
         if self._contact_conn is None:
@@ -100,25 +149,63 @@ class WeChatDB:
         return None, None
 
     # ── sender display name ──────────────────────────────────────
-    def get_display_name(self, wxid):
-        """通过 wxid 查昵称/备注 (带缓存)"""
+    def _get_group_nickname(self, wxid, chatroom):
+        """查询成员在某个群里的群昵称（缓存）。"""
+        if not self.contact or not chatroom:
+            return None
+        key = (chatroom, wxid)
+        if key in self._group_nick_cache:
+            return self._group_nick_cache[key]
+        try:
+            row = self.contact.execute(
+                "SELECT member_nickname FROM ChatRoom WHERE chatroom_username=? AND member_wxid=?",
+                (chatroom, wxid),
+            ).fetchone()
+            nick = row[0] if row and row[0] else None
+        except sqlite3.Error:
+            nick = None
+        self._group_nick_cache[key] = nick
+        return nick
+
+    def get_display_name(self, wxid, chatroom=None):
+        """通过 wxid 查显示名（带缓存）。
+
+        按 self._name_priority 列表顺序依次尝试，
+        前面的来源找不到就尝试下一个。
+        默认优先级: group_nickname → nickname → remark。
+        """
         if wxid in self._sender_cache:
             return self._sender_cache[wxid]
+
         if not self.contact:
             self._sender_cache[wxid] = wxid
             return wxid
+
         row = self.contact.execute(
             "SELECT nick_name, remark FROM contact WHERE username=?",
             (wxid,)
         ).fetchone()
-        if row:
-            nick, remark = row
-            if self.display_name_mode == "nickname":
-                name = nick or remark or wxid
-            else:
-                name = remark or nick or wxid
-        else:
-            name = wxid
+        if not row:
+            self._sender_cache[wxid] = wxid
+            return wxid
+
+        nick_name, remark = row
+        group_nick = self._get_group_nickname(wxid, chatroom) if chatroom else None
+
+        name = None
+        for source in self._name_priority:
+            if source == "group_nickname" and group_nick:
+                name = group_nick
+                break
+            elif source == "nickname" and nick_name:
+                name = nick_name
+                break
+            elif source == "remark" and remark:
+                name = remark
+                break
+
+        if not name:
+            name = group_nick or nick_name or remark or wxid
         self._sender_cache[wxid] = name
         return name
 
@@ -175,7 +262,8 @@ class WeChatDB:
         messages = []
         for row in rows:
             m = dict(zip(cols, row))
-            m["content_text"] = self._parse_content(m)
+            m["_db_path"] = db_path
+            m["content_text"] = self._parse_content(m, chatroom=username)
             messages.append(m)
         return messages
 
@@ -185,21 +273,81 @@ class WeChatDB:
             return data
         if isinstance(data, bytes):
             if len(data) > 2 and data[:2] == b'(\xb5':
-                # protobuf 编码的文本消息: 跳过头部，提取 wxid:\n 后的内容
+                # protobuf 编码的消息: 先找 wxid:\n 分隔符
                 sep = data.find(b':\n')
                 if sep >= 0 and sep < 100:
                     text = data[sep+2:]
-                    # errors='ignore' 跳过 protobuf 中夹杂的二进制字节
-                    decoded = text.decode("utf-8", errors="ignore")
-                    # 检查是否有足够可读内容
-                    cjk = sum(1 for c in decoded if '一' <= c <= '鿿')
-                    if cjk >= 3 or len(decoded.strip()) > 10:
+                    # 严格 UTF-8 解码：压缩数据会失败，真实文本会成功
+                    decoded = self._safe_decode(text)
+                    if decoded:
+                        return self._strip_binary(decoded)
+                # 没有 :\n 分隔符 → 尝试在 protobuf 中提取 XML（app 消息等）
+                # 查找真实的 XML 标签，不要只找 '<' 字节，避免把图片/表情等
+                # 二进制 protobuf 中的 0x3C 字节误判为 XML 开头。
+                xml_start = -1
+                for tag in (b'<?xml', b'<msg>', b'<msg ', b'<appmsg', b'<sysmsg',
+                            b'<emoji ', b'<gameext', b'<hardlink',
+                            b'<favitem', b'<mmreader'):
+                    pos = data.find(tag)
+                    if pos >= 0 and (xml_start < 0 or pos < xml_start):
+                        xml_start = pos
+                if xml_start > 0 and xml_start < len(data) - 20:
+                    decoded = data[xml_start:].decode("utf-8", errors="ignore")
+                    if decoded.strip().startswith('<') and len(decoded.strip()) > 10:
                         return self._strip_binary(decoded)
                 return None
+            # 无 (\xb5 前缀：完整 protobuf 消息或其他编码 → 搜索 wxid_ 模式
+            wxid_pos = data.find(b'wxid_')
+            if wxid_pos >= 0:
+                sep = data.find(b':\n', wxid_pos)
+                if sep >= 0 and sep - wxid_pos < 80:
+                    text = data[sep+2:]
+                    decoded = self._safe_decode(text)
+                    if decoded:
+                        return self._strip_binary(decoded)
             try:
                 return data.decode("utf-8")
             except UnicodeDecodeError:
                 return None
+        return None
+
+    def _safe_decode(self, data):
+        """解码 bytes 并判断是否为可读文本（而非压缩数据乱码）。
+
+        用宽松 UTF-8 解码以容忍微信消息中的少量非 UTF-8 字节（如
+        protobuf 包装），然后通过多个条件判断是否为真实文本。
+        压缩数据的随机字节几乎都不是合法 UTF-8，会被 errors="ignore"
+        大量丢弃，导致解码后字符数远小于原始字节数。真实文本则相反。
+        """
+        if isinstance(data, str):
+            return data
+        decoded = data.decode("utf-8", errors="ignore")
+        if not decoded.strip():
+            return None
+        total = len(decoded)
+        # 字节有效率：真实文本 > 15%，压缩数据远低于此
+        raw_len = len(data)
+        if raw_len > 0 and total / raw_len < 0.15:
+            return None
+        # CJK 字符计数 — 压缩数据几乎不会产生 CJK
+        cjk = sum(1 for c in decoded if '一' <= c <= '鿿')
+        if cjk >= 1:
+            return self._strip_binary(decoded)
+        # XML 检测
+        if decoded.strip().startswith('<') and total > 10:
+            return self._strip_binary(decoded)
+        # 纯 ASCII/英文：要求可打印字符占比高
+        if total > 5:
+            printable = sum(1 for c in decoded if c in '\n\r\t ' or
+                           (' ' <= c <= '~') or
+                           ('一' <= c <= '鿿') or
+                           ('　' <= c <= '〿') or
+                           ('＀' <= c <= '￯'))
+            if printable / total >= 0.85:
+                return self._strip_binary(decoded)
+        # 短文本：全部可打印就接受
+        if total <= 5 and all(c in '\n\r\t ' or ' ' <= c <= '~' for c in decoded):
+            return decoded
         return None
 
     def _strip_binary(self, text):
@@ -226,18 +374,129 @@ class WeChatDB:
                 consecutive_ctrl = 0
         return ''.join(result).rstrip()
 
-    def _parse_content(self, m):
+    def _split_msg_type(self, t):
+        """微信会把 app 子类型打包进高 32 位，低 32 位才是基础消息类型。"""
+        try:
+            t = int(t)
+        except (TypeError, ValueError):
+            return 0, 0
+        if t > 0xFFFFFFFF:
+            return t & 0xFFFFFFFF, t >> 32
+        return t, 0
+
+    def _parse_xml_root(self, text):
+        if not text:
+            return None
+        try:
+            return ET.fromstring(text)
+        except ET.ParseError:
+            try:
+                return ET.fromstring(html.unescape(text))
+            except ET.ParseError:
+                return None
+
+    def _xml_text(self, node, path):
+        if node is None:
+            return ""
+        text = node.findtext(path) or ""
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _summarize_refer_content(self, refer_type, content, max_len=160):
+        labels = {
+            "3": "图片", "34": "语音", "42": "名片", "43": "视频",
+            "47": "动画表情", "48": "位置", "50": "通话",
+        }
+        refer_type = str(refer_type or "").strip()
+        content = html.unescape(content or "")
+
+        if refer_type == "1":
+            text = re.sub(r"\s+", " ", content).strip()
+            return text[:max_len] + "..." if len(text) > max_len else text
+
+        if refer_type == "49":
+            root = self._parse_xml_root(content)
+            appmsg = root.find(".//appmsg") if root is not None else None
+            app_type = self._xml_text(appmsg, "type")
+            title = self._xml_text(appmsg, "title")
+            nested_labels = {
+                "5": "链接", "6": "文件", "19": "聊天记录",
+                "33": "小程序", "36": "小程序", "57": "引用消息",
+                "2000": "转账", "2001": "红包",
+            }
+            label = nested_labels.get(app_type, "卡片")
+            return f"[{label}] {title}" if title else f"[{label}]"
+
+        if refer_type in labels:
+            return f"[{labels[refer_type]}]"
+        return f"[type={refer_type}]" if refer_type else "[引用消息]"
+
+    def _format_refer_message(self, content, chatroom=None):
+        """渲染 appmsg type=57 的引用回复。
+
+        格式: 回复正文 {{引用消息 HH:MM 发送者 发送内容：被引用内容摘要}}
+        """
+        root = self._parse_xml_root(content)
+        appmsg = root.find(".//appmsg") if root is not None else None
+        if appmsg is None:
+            return None
+
+        app_type = self._xml_text(appmsg, "type")
+        if app_type != "57":
+            return None
+
+        reply_text = self._xml_text(appmsg, "title") or ""
+        refer = appmsg.find("refermsg")
+        if refer is None:
+            return reply_text if reply_text else None
+
+        refer_type = self._xml_text(refer, "type")
+        refer_content = refer.findtext("content") or ""
+        summary = self._summarize_refer_content(refer_type, refer_content)
+
+        # 被引用消息的发送者和时间
+        sender = self._xml_text(refer, "fromusr")
+        display = self._xml_text(refer, "displayname")
+        sender_label = self.get_display_name(sender, chatroom=chatroom) if sender else display
+
+        refer_time = ""
+        try:
+            ct = int(self._xml_text(refer, "createtime"))
+            refer_time = datetime.fromtimestamp(ct).strftime("%H:%M")
+        except (ValueError, OSError):
+            pass
+
+        # 组装成 {{引用消息 HH:MM 发送者 发送内容：摘要}}
+        meta_parts = "引用消息"
+        if refer_time:
+            meta_parts += f" {refer_time}"
+        if sender_label:
+            meta_parts += f" {sender_label}"
+        meta_parts += f" 发送内容：{summary}"
+        ref_tag = "{{" + meta_parts + "}}"
+
+        if reply_text:
+            return f"{reply_text} {ref_tag}"
+        return ref_tag
+
+    def _parse_content(self, m, chatroom=None):
         """从 message_content 中提取可读文本"""
         content = m.get("message_content")
         local_type = m.get("local_type", 0)
+        base_type, _ = self._split_msg_type(local_type)
         if not content:
-            return ""
+            return "" if base_type == 1 else self._type_label(local_type)
+
+        # 已知的纯二进制媒体类型 — 跳过 _try_decode，直接返回标签。
+        # 避免 protobuf 中的 0x3C 等字节被误判为可读文本。
+        _BINARY_MEDIA_TYPES = {3, 34, 42, 43, 47, 48, 50, 62}
+        if isinstance(content, bytes) and base_type in _BINARY_MEDIA_TYPES:
+            if len(content) > 2 and content[:2] == b'(\xb5':
+                return self._type_label(local_type)
 
         # 对于可读文本类型，尝试解析
         if isinstance(content, bytes):
             text = self._try_decode(content)
             if text is None:
-                # 二进制数据，按类型返回标签
                 return self._type_label(local_type)
             content = text
 
@@ -246,27 +505,60 @@ class WeChatDB:
         if ":\n" in content and not content.startswith("<") and not content.startswith("<?xml"):
             parts = content.split(":\n", 1)
             if len(parts) == 2 and len(parts[0]) < 80 and "\n" not in parts[0]:
-                return parts[1]
+                content = parts[1]
+
+        if base_type == 49:
+            refer = self._format_refer_message(content, chatroom=chatroom)
+            if refer:
+                return refer
         return content
 
     def _type_label(self, local_type):
         """根据 local_type 返回消息类型标签"""
         labels = {
+            1: "[文本]",
             3: "[图片]", 34: "[语音]", 42: "[名片]", 43: "[音视频通话]",
-            47: "[引用回复]", 48: "[位置]", 49: "[分享/链接]",
+            47: "[表情]", 48: "[位置]", 49: "[分享/链接]",
             50: "[音视频通话]", 62: "[小视频]", 66: "[第三方链接]",
-            268435456: "[红包]", 10002: "[系统消息]",
+            268435456: "[红包]", 10000: "[系统消息]", 10002: "[系统消息]",
         }
         if local_type in labels:
             return labels[local_type]
-        # 大数字类型 (如 244813135921) 通常是引用消息或富媒体
+        # 带子类型的大数字 — 拆分 base_type 和 sub_type
         if local_type > 1000000:
+            base_type, sub_type = self._split_msg_type(local_type)
+            sub_labels = {
+                57: "[引用消息]",
+                5: "[链接]",
+                6: "[文件]",
+                33: "[小程序]",
+                36: "[小程序]",
+                62: "[系统消息]",
+                2000: "[转账]",
+                2001: "[红包]",
+            }
+            if sub_type in sub_labels:
+                return sub_labels[sub_type]
+            if base_type in labels:
+                return labels[base_type]
             return "[富媒体消息]"
         return f"[消息类型 {local_type}]"
 
     def _parse_sender(self, m):
         """从消息中提取发送者 wxid"""
         content = m.get("message_content")
+        db_path = m.get("_db_path")
+
+        # 先查当前 DB 的 Name2Id，找不到再查全局
+        real_sender_id = m.get("real_sender_id")
+        if real_sender_id is not None:
+            if db_path:
+                sender = self._load_name2id(db_path).get(real_sender_id)
+                if sender:
+                    return sender
+            sender = self._load_global_name2id().get(real_sender_id)
+            if sender:
+                return sender
 
         # 先处理 protobuf 包装的 bytes 内容 — 从 wxid_ 前缀提取
         if isinstance(content, bytes) and content[:2] == b'(\xb5':
@@ -300,8 +592,11 @@ class WeChatDB:
 
         return None
 
-    def format_messages(self, messages, include_system=False):
-        """将消息列表格式化为 LLM 可读文本"""
+    def format_messages(self, messages, include_system=False, chatroom=None):
+        """将消息列表格式化为 LLM 可读文本
+
+        chatroom: 群聊的 wxid/username，用于 group_nickname 模式查群昵称。
+        """
         lines = []
         for m in reversed(messages):  # 正序输出
             local_type = m.get("local_type", 0)
@@ -319,7 +614,7 @@ class WeChatDB:
             dt = datetime.fromtimestamp(ts).strftime("%H:%M") if ts else "??"
             sender = self._parse_sender(m)
             if sender:
-                display = self.get_display_name(sender)
+                display = self.get_display_name(sender, chatroom=chatroom)
             elif m.get("real_sender_id") == 2:
                 display = self.self_name
             else:
@@ -327,8 +622,11 @@ class WeChatDB:
             lines.append(f"[{dt}] {display}: {text}")
         return "\n".join(lines)
 
-    def normalize_messages(self, messages, include_system=False):
-        """返回带 sender/time/text 的标准消息列表，供统计和报告使用。"""
+    def normalize_messages(self, messages, include_system=False, chatroom=None):
+        """返回带 sender/time/text 的标准消息列表，供统计和报告使用。
+
+        chatroom: 群聊的 wxid/username，用于 group_nickname 模式查群昵称。
+        """
         normalized = []
         for m in reversed(messages):
             local_type = m.get("local_type", 0)
@@ -342,7 +640,7 @@ class WeChatDB:
             dt = datetime.fromtimestamp(ts) if ts else None
             sender = self._parse_sender(m)
             if sender:
-                display = self.get_display_name(sender)
+                display = self.get_display_name(sender, chatroom=chatroom)
                 sender_id = sender
             elif m.get("real_sender_id") == 2:
                 display = self.self_name

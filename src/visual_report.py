@@ -29,7 +29,7 @@ def parse_llm_json(text):
         return None
 
 
-def build_stats(messages):
+def build_stats(messages, top_users_count=8):
     by_hour = Counter(msg["hour"] for msg in messages if msg["hour"] is not None)
     by_sender = Counter(msg["sender"] for msg in messages)
     total_chars = sum(len(msg["text"]) for msg in messages)
@@ -44,7 +44,7 @@ def build_stats(messages):
         "emoji_count": emojis,
         "hourly": {hour: by_hour.get(hour, 0) for hour in range(24)},
         "most_active_period": f"{active_hour:02d}:00-{(active_hour + 1) % 24:02d}:00" if by_hour else "无",
-        "top_users": by_sender.most_common(8),
+        "top_users": by_sender.most_common(top_users_count),
     }
 
 
@@ -65,8 +65,9 @@ def render_hourly_chart(hourly):
     return "\n".join(rows)
 
 
-def render_html_report(group_name, date_str, messages, analysis=None, output_path=None):
-    stats = build_stats(messages)
+def render_html_report(group_name, date_str, messages, analysis=None, output_path=None,
+                       top_users_count=9, evidence_per_topic=3):
+    stats = build_stats(messages, top_users_count=top_users_count)
     topics = (analysis or {}).get("topics") or []
     user_titles = (analysis or {}).get("user_titles") or []
 
@@ -88,7 +89,7 @@ def render_html_report(group_name, date_str, messages, analysis=None, output_pat
         if topic.get("evidence"):
             evidence_html = (
                 '<div class="evidence">'
-                + ''.join(f'<em>{html_escape(item)}</em>' for item in topic.get("evidence", [])[:3])
+                + ''.join(f'<em>{html_escape(item)}</em>' for item in topic.get("evidence", [])[:evidence_per_topic])
                 + '</div>'
             )
         card_html = (
@@ -104,7 +105,7 @@ def render_html_report(group_name, date_str, messages, analysis=None, output_pat
         topic_cards.append('<div class="empty">未进行 AI 话题分析，或模型未返回有效话题。</div>')
 
     user_cards = []
-    for item in user_titles[:8]:
+    for item in user_titles[:top_users_count]:
         name = item.get("name") or item.get("user") or "未知"
         title = item.get("title") or "群成员"
         reason = item.get("reason") or ""
