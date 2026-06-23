@@ -150,7 +150,7 @@ def _focus_chat_input() -> None:
 
 
 def _check_input_has_content() -> bool:
-    """清剪贴板 → Ctrl+A → Ctrl+C 探测输入框有无文字。
+    """清剪贴板 → Ctrl+A → Ctrl+C 探测输入框有无文字或图片。
 
     调用前需确保焦点已在输入框（由 _focus_chat_input 负责）。
     返回 True 表示输入框有内容（跳过发送），False 表示为空（安全粘贴）。
@@ -167,8 +167,25 @@ def _check_input_has_content() -> bool:
     pyautogui.hotkey("ctrl", "c")
     time.sleep(0.15)
 
+    # 3. 检查文本
     new_text = _get_clipboard_text()
-    return bool(new_text and new_text.strip())
+    if new_text and new_text.strip():
+        return True
+
+    # 4. 检查图片（微信输入框里的图片复制出来是 CF_DIB 或 CF_BITMAP）
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                return True
+            if win32clipboard.IsClipboardFormatAvailable(win32con.CF_BITMAP):
+                return True
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception:
+        pass
+
+    return False
 
 
 def _copy_image_to_clipboard(image_path: str) -> None:

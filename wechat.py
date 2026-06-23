@@ -17,6 +17,7 @@ from keys import generate_keys
 from paths import ALL_KEYS_FILE, DECRYPTED_DIR, EXPORT_DIR, LOGS_DIR, REPORTS_DIR, WECHAT_DECRYPT_CONFIG
 from query import WeChatDB
 from visual_report import parse_llm_json, render_html_report, render_html_to_png
+from templates import DEFAULT_TEMPLATE, list_templates
 
 CONFIG_FILE = os.path.join(PROJECT_DIR, "config.jsonc")
 DEFAULT_SETTINGS = {
@@ -39,6 +40,7 @@ DEFAULT_SETTINGS = {
         "format": "html",
         "render_png": True,
         "include_raw_sample": True,
+        "template": DEFAULT_TEMPLATE,
         "limits": {
             "top_users": 8,
             "evidence_per_topic": 3,
@@ -298,7 +300,8 @@ def analyze_structured_with_llm(messages_text, group_name, date_str, llm_config)
   ],
   "user_titles": [
     {{"name": "成员名", "title": "简短称号", "reason": "为什么给这个称号"}}
-  ]
+  ],
+  "quote": {{"text": "一句名言金句", "source": "出处"}}
 }}
 
 要求：
@@ -311,6 +314,8 @@ def analyze_structured_with_llm(messages_text, group_name, date_str, llm_config)
 - user_titles 只给真实有发言的人，称号要基于行为，不要攻击性。
 - 不要把“我”误写成聊天记录里的其他联系人。
 - evidence 使用短摘录，不超过 3 条，每条不超过 40 字。
+- quote.text 必须是根据当日群聊主题/氛围生成的一句名言或金句（20-60字）。优先匹配真实历史名人名言；如无合适的名人名言，可引用热门小说/影视/动漫台词；如果都找不到匹配的，就杜撰一句并给一个幽默的出处（如"沃兹基·硕德"、"佚名·网友"、"群聊共识"等）,实在没什么主题，最终的保底方案就是“我宁愿什么都不做，也绝不犯错。 --霸哥”。
+- quote.source 必须是该名言/金句的出处。
 
 聊天记录：
 {messages_text}
@@ -406,6 +411,20 @@ def cmd_groups(_args):
     return 0
 
 
+def cmd_templates(_args):
+    print()
+    print("=" * 44)
+    print("  可用 HTML 报告模板")
+    print("=" * 44)
+    for tid, name, desc in list_templates():
+        marker = " (默认)" if tid == DEFAULT_TEMPLATE else ""
+        print(f"  {tid:<12} {name}{marker}")
+        if desc:
+            print(f"  {'':12} {desc}")
+        print()
+    return 0
+
+
 def cmd_report(args):
     settings = load_config()
     llm_config = settings.get("llm", DEFAULT_SETTINGS["llm"])
@@ -424,25 +443,50 @@ def cmd_report(args):
     summaries = {}
     visual_outputs = []
     limits = settings.get("report", {}).get("limits", DEFAULT_SETTINGS["report"]["limits"])
+    template_name = args.template or settings.get("report", {}).get("template", DEFAULT_TEMPLATE)
+    total = len(groups)
+
+    # ── 头部 ──────────────────────────────────────────────
+    print()
+    print("=" * 52)
+    print(f"  微信日报  ·  {date_str}")
+    print("=" * 52)
+    print(f"  群聊   : {total} 个")
+    print(f"  模板   : {template_name}")
+    for i, g in enumerate(groups, 1):
+        print(f"    {i}. {g}")
+    print()
+
     try:
-        print(f"日期: {date_str}")
-        print(f"目标群: {groups}")
-        for group_name in groups:
-            print(f"\n--- {group_name} ---")
+        for idx, group_name in enumerate(groups, 1):
+            tag = f"[{idx}/{total}]"
+            print("-" * 52)
+            print(f"  {tag} {group_name}")
+            print("-" * 52)
+
             username = find_group(db, group_name)
             if not username:
-                print(f"[SKIP] 未找到群: {group_name}")
+                print(f"  {chr(10007)} 未找到群")
                 continue
             display = db.get_chatroom_name(username)
             messages = db.query_messages(username, start_time=start, end_time=end, limit=args.limit)
-            print(f"chatroom: {username} ({display})")
-            print(f"消息数: {len(messages)}")
+            print(f"  Chatroom : {username}")
+            print(f"  显示名称 : {display}")
             if not messages:
+                print(f"  消息数   : 0")
                 continue
 
             normalized = db.normalize_messages(messages, chatroom=username)
+            participants = len(set(m["sender"] for m in normalized))
+            print(f"  消息数   : {len(messages)}")
+            print(f"  参与人数 : {participants}")
             formatted = "\n".join(f'[{m["time_text"]}] {m["sender"]}: {m["text"]}' for m in normalized)
-            analysis = None if args.dry_run or args.skip_analysis else analyze_structured_with_llm(formatted, display, date_str, llm_config)
+            llm_ok = False
+            if args.dry_run or args.skip_analysis:
+                analysis = None
+            else:
+                analysis = analyze_structured_with_llm(formatted, display, date_str, llm_config)
+                llm_ok = analysis is not None
             summary = (analysis or {}).get("summary")
             summaries[display] = {
                 "count": len(messages),
@@ -453,8 +497,10 @@ def cmd_report(args):
             html_path = os.path.join(REPORTS_DIR, f"report_{date_str}_{safe_name}.html")
             render_html_report(display, date_str, normalized, analysis, html_path,
                                top_users_count=limits.get("top_users", 8),
-                               evidence_per_topic=limits.get("evidence_per_topic", 3))
+                               evidence_per_topic=limits.get("evidence_per_topic", 3),
+                               template=template_name)
             visual_outputs.append(html_path)
+
             if settings.get("report", {}).get("render_png", True):
                 png_path = os.path.join(REPORTS_DIR, f"report_{date_str}_{safe_name}.png")
                 ok, reason = render_html_to_png(html_path, png_path)
@@ -463,18 +509,26 @@ def cmd_report(args):
                     if args.send:
                         _send_report(png_path, display)
                 else:
-                    print(f"[WARN] PNG 生成失败: {reason}")
+                    print(f"  PNG 生成失败: {reason}")
+
+            # 单群状态行
+            parts = [f"报告: {'OK' if analysis or args.dry_run or args.skip_analysis else 'N/A'}"]
+            if not args.dry_run and not args.skip_analysis:
+                icon = "OK" if llm_ok else "FAIL"
+                parts.append(f"LLM: {icon}")
+            print("  " + "  |  ".join(parts))
     finally:
         db.close()
 
+    # ── 尾部 ──────────────────────────────────────────────
+    print()
     if not summaries:
-        print("\n没有数据可生成报告")
+        print("  没有数据可生成报告")
         return 0
+    print(f"  完成 {len(summaries)}/{total} 个群, 报告输出至:")
     paths = render_report(summaries, date_str)
     for path in paths:
-        print(f"\n报告已保存: {path}")
-    for output in visual_outputs:
-        print(f"可视化报告: {output}")
+        print(f"    {path}")
     return 0
 
 
@@ -494,9 +548,13 @@ def build_parser():
     groups = sub.add_parser("groups", help="列出可用群聊")
     groups.set_defaults(func=cmd_groups)
 
+    templates_parser = sub.add_parser("templates", help="列出可用的 HTML 报告模板")
+    templates_parser.set_defaults(func=cmd_templates)
+
     report = sub.add_parser("report", help="生成群聊日报")
     report.add_argument("--date", help="日期 YYYY-MM-DD，默认今天")
     report.add_argument("--groups", help="群名列表，逗号分隔，如: 家,.NET性能优化")
+    report.add_argument("--template", help=f"HTML 模板，可选: {', '.join(t for t, _, _ in list_templates())}，默认: {DEFAULT_TEMPLATE}")
     report.add_argument("--dry-run", action="store_true", help="不调用 LLM，只输出消息样本")
     report.add_argument("--skip-analysis", action="store_true", help="跳过 LLM 分析，保留历史分析结果")
     report.add_argument("--limit", type=int, default=1000, help="每个群最多读取消息数")

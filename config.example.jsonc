@@ -6,39 +6,34 @@
     ".NET性能优化",
     "西安爱翔股份有钱公司"
   ],
-
   // 当前设备主人的 wxid。通常可以留空。
   // 留空时，自己发出的无 wxid 前缀消息会显示为 self_name。
   "self_wxid": "",
-
   // 自己在报告中的显示名称。
   // 如果你不想显示真实姓名，可以保留为“我”。
   "self_name": "我",
-
   // 联系人名称显示优先级。按列表顺序从上到下尝试，前面的找不到就用后面的。
   // 可选值: group_nickname(群昵称), nickname(微信昵称), remark(备注)
-  "display_name_priority": ["group_nickname", "nickname", "remark"],
-
+  "display_name_priority": [
+    "group_nickname",
+    "nickname",
+    "remark"
+  ],
   // 大模型配置。当前通过 LiteLLM 调用 DeepSeek 的 Anthropic-compatible endpoint。
   "llm": {
     // DeepSeek API Key。真实 key 只写在 config.jsonc，不要提交。
     "auth_token": "replace_with_your_api_key",
-
     // DeepSeek 的 Anthropic 兼容接口地址。
     "base_url": "https://api.deepseek.com/anthropic",
-
     // LiteLLM 模型名。
     // anthropic/ 是 LiteLLM provider/协议前缀，表示按 Anthropic 兼容协议请求 base_url。
     // 日常更快: anthropic/deepseek-v4-flash
     // 质量更高但更慢: anthropic/deepseek-v4-pro
     "model": "anthropic/deepseek-v4-pro",
-
     // 单次 LLM 请求超时时间，单位秒。
     "timeout": 90,
-
     // LiteLLM 重试次数。设为 0 可以避免慢请求被隐藏重试。
     "num_retries": 0,
-
     // LLM 输出 token 限制。
     // "summarize" 用于短总结（默认 1500）。
     // "analyze" 用于结构化话题+称号分析（默认 5000）。
@@ -47,19 +42,18 @@
       "analyze": 5000
     }
   },
-
   // 报告输出配置。
   "report": {
     // 当前支持 html。Markdown 汇总也会同时输出。
     "format": "html",
-
+    // HTML 报告模板。可选: default（极简白）, stock（股票终端）, anime（二次元）, terminal（黑客终端）, scrapbook （手账剪贴簿）。
+    // 默认 "default"。运行时也可以用 --template 覆盖。
+    "template": "default",
     // 是否把 HTML 报告渲染成 PNG 图片。
     // 需要安装: python -m playwright install chromium
     "render_png": true,
-
     // Markdown 报告中是否保留部分原始消息样本。
     "include_raw_sample": true,
-
     // 报告展示数量限制 (硬编码移入配置)。
     "limits": {
       // 最活跃用户 / 称号区域最多展示人数。默认 8。
