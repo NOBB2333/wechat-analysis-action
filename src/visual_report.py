@@ -66,10 +66,31 @@ def html_escape(value):
     return html.escape(str(value), quote=True)
 
 
+def _enrich_evidence(topics, messages):
+    """给每条 evidence 匹配原始消息，补上发送者名称。"""
+    for topic in topics:
+        enriched = []
+        for item in topic.get("evidence", []):
+            matched_sender = None
+            # LLM 摘录的 evidence 是原话片段，去空白后匹配
+            clean = item.strip()
+            for m in messages:
+                if clean and (clean in m["text"] or m["text"] in clean):
+                    matched_sender = m["sender"]
+                    break
+            if matched_sender:
+                enriched.append(f"{matched_sender}：{item}")
+            else:
+                enriched.append(item)
+        topic["evidence"] = enriched
+    return topics
+
+
 def render_html_report(group_name, date_str, messages, analysis=None, output_path=None,
                        top_users_count=9, evidence_per_topic=3, template=None):
     stats = build_stats(messages, top_users_count=top_users_count)
     topics = (analysis or {}).get("topics") or []
+    topics = _enrich_evidence(topics, messages)
     user_titles = (analysis or {}).get("user_titles") or []
     quote = (analysis or {}).get("quote") or {}
 

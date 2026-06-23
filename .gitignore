@@ -21,6 +21,7 @@ all_keys.json
 tools/wechat-decrypt/all_keys.json
 tools/wechat-decrypt/config.json
 tools/astrbot_plugin_qq_group_daily_analysis-当个参考用/
+tools/wx_key_source_code
 
 # 日报输出
 daily_report.log

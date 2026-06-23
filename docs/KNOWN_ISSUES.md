@@ -2,28 +2,37 @@
 
 > 本文记录在开发和调试微信 4.1 聊天记录解析过程中发现的技术细节、已解决的问题、以及当前限制。
 
-## 1. WCDB_CT=4 消息体压缩
+## 1. 消息体压缩
 
-### 现象
+微信 4.1 中 `message_content` 可能出现两种压缩/编码：
 
-部分消息的 `message_content` 被 WCDB（微信数据库库）压缩。压缩后的字节流：
+### 1.1 zstd 压缩（已处理）
+
+部分消息（尤其是引用回复、链接卡片等 app 消息）用 **zstd** 压缩，4 字节 magic 为 `0x28B52FFD`（即 `(\xb5/\xfd`）。
+
+- **处理方式**：`query.py` 中通过 `zstandard` 库解压，再按 protobuf/XML 流程解析
+- **影响**：引用回复、链接分享等现在可以正常显示
+
+### 1.2 WCDB_CT=4 私有压缩（无法处理）
+
+部分消息被 WCDB（微信数据库库）用私有算法压缩。压缩后的字节流：
 - 不是 zlib / zstd / lz4 / brotli / snappy 等已知算法
-- 属于微信私有格式，目前无法解压
+- 属于微信内部格式，目前无法解压
 
-### 影响范围
+#### 影响范围
 
 - **type 1（文本消息）**：压缩后文本不可读，显示为 `[文本]`
 - **type 49 / sub_type 57（引用回复）**：压缩后无法提取回复正文和引用详情，只能显示 `[引用消息]`
 - **type 49 其他子类型**：压缩后只能显示类型标签
 
-### 数据库特征
+#### 数据库特征
 
 `packed_info_data` 列在微信 4.1 中可能总是非 NULL，**不能**作为判断内容是否压缩的依据。目前通过 `_safe_decode` 的字节有效率检测来间接识别压缩数据。
 
-### 尝试过但不可行的方案
+#### 尝试过但不可行的方案
 
 - zlib 各种 wbits 组合：不解压
-- zstd / lz4 / brotli / snappy：不解压
+- lz4 / brotli / snappy：不解压
 - raw deflate 在多个偏移量尝试：不解压
 - 需要 WCDB 解压库（微信内部库，未公开）
 
@@ -97,19 +106,63 @@ local_type > 0xFFFFFFFF 时:
 - 纯 ASCII 的长压缩数据（罕见的字节分布）可能通过 85% 可打印检查
 - 纯表情/emoji 消息可能被误判为不可读（emoji 不在 "可打印" 范围内，但通常伴随文字）
 
-## 4. 引用消息显示
+## 4. 引用/回复消息解析
 
-### 非压缩内容（WCDB_CT=0）
+微信 4.1 中引用回复是 `local_type = 49 | (57 << 32)`，消息体通常先用 **zstd** 压缩，外层是 protobuf 包装：`wxid_...:\n<body>`。
 
-`_format_refer_message` 可以完整解析并显示：
+### 解析流程
+
+1. **zstd 解压**
+   - 消息体以 4 字节 magic `0x28B52FFD`（即 `(\xb5/\xfd`）开头
+   - 用 `zstandard` 解压后得到 `wxid_...:\n<?xml...><msg>...</msg>`
+
+2. **提取外层 XML**
+   - `_try_decode` 先搜索 `<?xml` / `<msg>` / `<appmsg>` 等真实 XML 标记
+   - 找到第一个 XML 标记后，往回找最近的 `:\n` 作为 sender/text 分隔符
+   - **关键**：`<refermsg><content>` 内部还会嵌套被引用消息的 `wxid_...:\n&lt;?xml...`，如果直接搜索第一个 `wxid_` 会误把被引用的内容当主消息。因此必须优先按 XML 标记定位外层回复消息。
+
+3. **解析引用结构**
+   - `_format_refer_message` 读取 `<appmsg><type>57</type>` 确认是引用回复
+   - `<appmsg><title>`：回复者输入的文字（可能为空，如只发了一个表情）
+   - `<refermsg>` 下：
+     - `<type>`：被引用消息类型（1 文本、3 图片、43 视频、49 富媒体等）
+     - `<content>`：被引用消息的内容（文本或转义后的 XML）
+     - `<createtime>`：被引用消息时间
+     - `<chatusr>`：被引用者 wxid（注意不是 `<fromusr>`，后者是群聊 id）
+     - `<displayname>`：被引用者当时的显示名
+   - 被引用者当前显示名通过 `get_display_name(chatusr, chatroom=...)` 解析，优先群昵称
+
+4. **被引用内容摘要**
+   - `_summarize_refer_content` 按被引用类型生成摘要：
+     - type 1：截取文本前 40 字
+     - type 3/34/43/47/48/50：`[图片]`、`[语音]`、`[视频]`、`[动画表情]`、`[位置]`、`[通话]`
+     - type 49：再解析 `<appmsg><type>`，生成 `[链接] 标题`、`[文件]`、`[小程序]`、`[红包]`、`[转账]`、`[聊天记录]` 等
+
+5. **渲染格式**
+   ```
+   回复正文 {{引用消息 HH:MM 发送者 发送内容：摘要}}
+   ```
+   示例：
+   ```
+   [强] {{引用消息 08:55 本群第一瓦吹 发送内容：[图片]}}
+   是的，自从被套了 {{引用消息 16:12 *ST渣马 发送内容：[图片]}}
+   ```
+
+### 过滤问题（已修复）
+
+`normalize_messages` 曾有一条过滤规则：
+```python
+if not include_system and local_type != 1 and not text.startswith("["):
+    continue
 ```
-回复正文 {{引用消息 10:30 张三 发送内容：摘要}}
-```
-包含：回复者说的话、被引用时间、被引用者名称、被引用内容摘要（≤ 40 字）。
+这导致大量引用消息被丢弃——只有回复正文是 `[强]`、`[图片]` 等以 `[` 开头的消息才会保留。
 
-### 压缩内容（WCDB_CT=4）
+当前规则改为：非文本消息只要有可读文本就保留，只显式跳过系统消息（`local_type=10000/10002`）。
 
-只能显示 `[引用消息]`，无法提取任何详情。reply 正文和 refermsg 都在被压缩的 XML 中。
+### 仍无法解析的情况
+
+- **WCDB_CT=4 私有压缩**：如果消息体被微信 WCDB 私有算法压缩（非 zstd），`_safe_decode` 会识别为不可读，最终显示 `[引用消息]`
+- 被引用消息本身也是引用消息时，摘要会显示为 `[引用消息] 原回复正文`，不会无限递归展开
 
 ## 5. 联系人显示名称优先级
 
@@ -118,7 +171,7 @@ local_type > 0xFFFFFFFF 时:
 "display_name_priority": ["group_nickname", "nickname", "remark"]
 ```
 
-- `group_nickname`：从 `contact.db` 的 `ChatRoom` 表查群昵称
+- `group_nickname`：从 `contact.db` 的 `chat_room` 表解析 `ext_buffer` 中的 protobuf 成员列表获取群昵称
 - `nickname`：微信昵称（`contact.nick_name`）
 - `remark`：你设置的备注（`contact.remark`）
 

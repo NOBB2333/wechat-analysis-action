@@ -4,3 +4,4 @@ playwright
 pywin32
 pyautogui
 Pillow
+zstandard
