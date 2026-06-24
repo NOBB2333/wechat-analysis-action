@@ -46,6 +46,7 @@ DEFAULT_SETTINGS = {
             "evidence_per_topic": 3,
             "sample_truncation": 1000,
         },
+        "extract_images": True,
     },
 }
 
@@ -510,6 +511,20 @@ def cmd_report(args):
                         _send_report(png_path, display)
                 else:
                     print(f"  PNG 生成失败: {reason}")
+
+            # 图片提取
+            if not args.dry_run and settings.get("report", {}).get("extract_images", False):
+                try:
+                    from image_extract import extract_chat_images
+                    img_dir = os.path.join(
+                        os.path.dirname(REPORTS_DIR), "decoded_images",
+                        safe_name, date_str
+                    )
+                    result = extract_chat_images(username, date_str, img_dir)
+                    if result.get("ok"):
+                        print(f"  图片提取: {result['ok']}/{result['total']}")
+                except Exception as e:
+                    print(f"  图片提取失败: {e}")
 
             # 单群状态行
             parts = [f"报告: {'OK' if analysis or args.dry_run or args.skip_analysis else 'N/A'}"]

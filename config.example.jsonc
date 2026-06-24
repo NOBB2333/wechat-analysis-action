@@ -52,6 +52,9 @@
     // 是否把 HTML 报告渲染成 PNG 图片。
     // 需要安装: python -m playwright install chromium
     "render_png": true,
+    // 是否在生成日报时同时提取群聊图片。
+    // 需要运行过一次 tools/wechat-decrypt/find_image_key.py 提取图片 AES key。
+    "extract_images": true,
     // Markdown 报告中是否保留部分原始消息样本。
     "include_raw_sample": true,
     // 报告展示数量限制 (硬编码移入配置)。

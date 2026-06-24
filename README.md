@@ -10,6 +10,13 @@ WeChatDecrypt 复用数据库/MCP/图片语音能力
 wechat.py 把流程串起来
 ```
 
+## 效果展示
+
+<p align="center">
+  <img src="docs/images/image1.png" width="48%" alt="长红巨牛">
+  <img src="docs/images/image2.png" width="48%" alt=".NET+AI 智能体开发课程群">
+</p>
+
 ## 目录结构
 
 ```text
