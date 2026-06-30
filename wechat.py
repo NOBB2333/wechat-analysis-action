@@ -8,15 +8,26 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-SRC_DIR = os.path.join(PROJECT_DIR, "src")
-sys.path.insert(0, SRC_DIR)
+if getattr(sys, 'frozen', False):
+    PROJECT_DIR = os.path.dirname(sys.executable)
+    _BASE = os.path.join(PROJECT_DIR, '_internal')
+    WECHAT_CORE = os.path.join(_BASE, 'core-wechat')
+    sys.path.insert(0, WECHAT_CORE)
+    sys.path.insert(0, os.path.join(_BASE, 'tools', 'wechat-decrypt'))
+else:
+    PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+    WECHAT_CORE = os.path.join(PROJECT_DIR, "core-wechat")
+    sys.path.insert(0, WECHAT_CORE)
 
 from decrypt import decrypt_from_keys
 from keys import generate_keys
 from paths import ALL_KEYS_FILE, DECRYPTED_DIR, EXPORT_DIR, LOGS_DIR, REPORTS_DIR, WECHAT_DECRYPT_CONFIG
 from query import WeChatDB
 from visual_report import parse_llm_json, render_html_report, render_html_to_png
+import sys as _sys
+_shared_dir = os.path.join(PROJECT_DIR, "shared")
+if _shared_dir not in _sys.path:
+    _sys.path.insert(0, _shared_dir)
 from templates import DEFAULT_TEMPLATE, list_templates
 
 CONFIG_FILE = os.path.join(PROJECT_DIR, "config.jsonc")
@@ -312,9 +323,9 @@ def analyze_structured_with_llm(messages_text, group_name, date_str, llm_config)
 - @对象不是话题，也不是有效证据；纯@消息必须忽略，除非后续有实质内容形成同一段讨论。
 - 如果短句是同一段讨论的一部分，应合并到对应话题。
 - contributors 必须来自聊天记录中出现的成员名。
-- user_titles 只给真实有发言的人，称号要基于行为，不要攻击性。
+- user_titles 只给真实有发言的人，称号要基于行为，不要攻击性。 发起人与参与者尽量都有，不要只给几个人，最多输出9条
 - 不要把“我”误写成聊天记录里的其他联系人。
-- evidence 使用短摘录，不超过 3 条，每条不超过 40 字。
+- evidence 使用短摘录，不超过 3 条，每条不超过 80 字。
 - quote.text 必须是根据当日群聊主题/氛围生成的一句名言或金句（20-60字）。优先匹配真实历史名人名言；如无合适的名人名言，可引用热门小说/影视/动漫台词；如果都找不到匹配的，就杜撰一句并给一个幽默的出处（如"沃兹基·硕德"、"佚名·网友"、"群聊共识"等）,实在没什么主题，最终的保底方案就是“我宁愿什么都不做，也绝不犯错。 --霸哥”。
 - quote.source 必须是该名言/金句的出处。
 

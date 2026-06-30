@@ -4,10 +4,10 @@
 
 ## 一、数据库概览
 
-解密后 `export/decrypted/` 下的文件结构：
+解密后 `export_parse_result/decrypted_wechat/` 下的文件结构：
 
 ```
-export/decrypted/
+export_parse_result/decrypted_wechat/
 ├── contact/
 │   └── contact.db           # 联系人、群信息、群昵称
 ├── session/

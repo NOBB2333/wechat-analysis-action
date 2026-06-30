@@ -8,7 +8,10 @@ import struct
 
 from Crypto.Cipher import AES
 
-from paths import ALL_KEYS_FILE, DECRYPTED_DIR
+try:
+    from paths import ALL_KEYS_FILE, DECRYPTED_DIR
+except ImportError:
+    from .paths import ALL_KEYS_FILE, DECRYPTED_DIR
 
 PAGE_SZ = 4096
 SALT_SZ = 16
@@ -123,7 +126,7 @@ def decrypt_from_keys(keys_file=ALL_KEYS_FILE, output_dir=DECRYPTED_DIR, only=No
 def main(argv=None):
     parser = argparse.ArgumentParser(description="解密 all_keys.json 中记录的微信数据库")
     parser.add_argument("--keys-file", default=ALL_KEYS_FILE, help="默认 export/all_keys.json")
-    parser.add_argument("--output-dir", default=DECRYPTED_DIR, help="默认 export/decrypted")
+    parser.add_argument("--output-dir", default=DECRYPTED_DIR, help="默认 export_parse_result/decrypted_wechat")
     parser.add_argument("--only", help="只解密包含该字符串的相对路径，如 session.db")
     args = parser.parse_args(argv)
 

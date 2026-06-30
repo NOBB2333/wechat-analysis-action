@@ -11,7 +11,10 @@ try:
 except ImportError:
     zstandard = None
 
-from paths import DECRYPTED_DIR
+try:
+    from paths import DECRYPTED_DIR
+except ImportError:
+    from .paths import DECRYPTED_DIR
 
 def md5(s):
     return hashlib.md5(s.encode()).hexdigest()

@@ -16,7 +16,10 @@ TOOLS_DIR = os.path.join(PROJECT_DIR, "tools", "wechat-decrypt")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
-from paths import DECRYPTED_DIR
+try:
+    from paths import DECRYPTED_DIR
+except ImportError:
+    from .paths import DECRYPTED_DIR
 from decode_image import decrypt_dat_file, extract_md5_from_packed_info
 
 

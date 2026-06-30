@@ -1,5 +1,7 @@
 # wx_key 工具二进制 (132MB)
 tools/wx_key/
+# 参考 目前没用到
+tools/chatlog_alpha_早期参考  
 
 # 本地配置与 API key
 config.jsonc
@@ -12,9 +14,17 @@ config.jsonc
 # Python
 __pycache__/
 *.pyc
+build
+dist
 
 # 解密输出
 export/
+export_parse_result
+
+# 平台解密工作目录（含敏感数据）
+dingtalk_parse/
+feishu_parse/
+parse-feishu/
 
 # 密钥文件 (敏感)
 all_keys.json
@@ -22,6 +32,8 @@ tools/wechat-decrypt/all_keys.json
 tools/wechat-decrypt/config.json
 tools/astrbot_plugin_qq_group_daily_analysis-当个参考用/
 tools/wx_key_source_code
+tools/OpenFeiShuApis飞书第三方API集成库
+
 
 # 日报输出
 daily_report.log

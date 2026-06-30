@@ -7,9 +7,17 @@ import os
 import struct
 import sys
 
-from paths import ALL_KEYS_FILE, WECHAT_DECRYPT_DIR
+try:
+    from paths import ALL_KEYS_FILE, WECHAT_DECRYPT_DIR
+except ImportError:
+    from .paths import ALL_KEYS_FILE, WECHAT_DECRYPT_DIR
 
-sys.path.insert(0, os.path.abspath(WECHAT_DECRYPT_DIR))
+import sys as _sys
+if getattr(_sys, 'frozen', False):
+    _decrypt_path = os.path.join(os.path.dirname(_sys.executable), 'tools', 'wechat-decrypt')
+else:
+    _decrypt_path = os.path.abspath(WECHAT_DECRYPT_DIR)
+_sys.path.insert(0, _decrypt_path)
 from key_scan_common import collect_db_files  # noqa: E402
 
 PAGE_SZ = 4096

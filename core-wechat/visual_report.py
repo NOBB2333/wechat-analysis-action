@@ -5,7 +5,14 @@ import os
 import re
 from collections import Counter
 
-from paths import REPORTS_DIR
+try:
+    from paths import REPORTS_DIR
+except ImportError:
+    from .paths import REPORTS_DIR
+import sys as _sys
+_shared = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shared")
+if _shared not in _sys.path:
+    _sys.path.insert(0, _shared)
 from templates import DEFAULT_TEMPLATE, list_templates, render_template
 
 

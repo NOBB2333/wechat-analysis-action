@@ -5,3 +5,6 @@ pywin32
 pyautogui
 Pillow
 zstandard
+fastapi
+uvicorn
+sqlcipher3
